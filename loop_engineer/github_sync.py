@@ -174,6 +174,7 @@ class GitHubSyncManager:
         ).stdout.splitlines()
 
         if "origin" not in remotes:
+            subprocess.run([GH_BIN, "auth", "setup-git"], cwd=repo_dir, capture_output=True)
             cmd = [
                 GH_BIN,
                 "repo",
@@ -184,14 +185,17 @@ class GitHubSyncManager:
                 repo_dir,
                 "--remote",
                 "origin",
-                "--push",
             ]
             if description:
                 cmd.extend(["--description", description])
             proc = subprocess.run(cmd, cwd=repo_dir, capture_output=True, text=True)
-            if proc.returncode == 0:
-                return True, f"Created and pushed https://github.com/{username}/{repo_name}"
-            return False, proc.stderr.strip() or proc.stdout.strip()
+            if proc.returncode != 0 and "already exists" not in (proc.stderr or ""):
+                return False, proc.stderr.strip() or proc.stdout.strip()
+            subprocess.run(
+                [GIT_BIN, "remote", "set-url", "origin", f"https://github.com/{username}/{repo_name}.git"],
+                cwd=repo_dir,
+                capture_output=True,
+            )
 
         proc = subprocess.run(
             [GIT_BIN, "push", "-u", "origin", "main"],
