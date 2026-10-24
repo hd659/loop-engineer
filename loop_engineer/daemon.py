@@ -1,82 +1,27 @@
 """
-Autonomous Loop Daemon & On-Demand Model Dispatcher.
+Autonomous Loop Daemon & Pi Agent (`claude-opus-5-5-high`) Dispatcher.
 
 Architecture:
-- Lightweight Python script stays resident in the background (0 LLM token cost during hourly polling).
-- Periodically harvests local conversation & diary signals into `.state/backlog.json`.
-- Once per day (or via `python3 loop.py trigger`), the script packages the collected signals and
-  next milestone specification into a structured prompt and pushes it to the model via:
-  1. Primary: Antigravity Hub (`agentapi new-conversation`) in `/Users/huanghaodong/Desktop/project`
-  2. Fallback: Local/VPS Personal AI Gateway (`http://127.0.0.1:18318/v1` / `http://127.0.0.1:8318/v1`)
-- The model wakes up, writes the code, runs `pytest`, commits & pushes to `hd659`, and exits immediately.
+- Lightweight Python script stays resident in the background (0 LLM token cost during polling).
+- Harvests local conversation & diary signals into `.state/backlog.json`.
+- When triggered (either on daily schedule or immediately via `loop.py trigger` / `loop.py run-plan`),
+  the script packages the milestone specification and dispatches it to **Pi Agent (`pi`)**
+  using **`local-gateway/claude-opus-5-5-high`** (Opus 5.5 via local gateway `:18318`).
+- Pi wakes up, writes the code and unit tests, runs `pytest`, commits & pushes to `hd659`, and exits.
 """
 
 import json
 import os
-import re
 import subprocess
 import time
-import urllib.request
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .collector import ConversationCollector
 from .github_sync import GitHubSyncManager
 from .planner import CommitMilestone, PlannedProject, WeeklyPlanner
 
-AGENTAPI_BIN = "/Users/huanghaodong/.gemini/antigravity/bin/agentapi"
-
-
-def discover_antigravity_bridge() -> Optional[Dict]:
-    """Dynamically discover running Antigravity Hub language_server port and CSRF token."""
-    try:
-        ps_out = subprocess.check_output(["ps", "-axo", "pid,command"], text=True, timeout=5)
-    except Exception:
-        return None
-
-    target_pid = None
-    csrf_token = None
-    for line in ps_out.splitlines():
-        if "Antigravity.app/Contents/Resources/bin/language_server" in line and "--csrf_token" in line:
-            parts = line.strip().split(None, 1)
-            if not parts:
-                continue
-            target_pid = parts[0]
-            m = re.search(r"--csrf_token\s+([A-Za-z0-9_-]+)", line)
-            if m:
-                csrf_token = m.group(1)
-            break
-
-    if not target_pid or not csrf_token:
-        return None
-
-    try:
-        lsof_out = subprocess.check_output(
-            ["/usr/sbin/lsof", "-a", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", str(target_pid)],
-            text=True,
-            timeout=5,
-        )
-    except Exception:
-        return None
-
-    ports = [int(m.group(1)) for m in re.finditer(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)", lsof_out)]
-    if not ports:
-        return None
-
-    chosen_port = ports[-1]
-    for p in ports:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{p}/healthz", timeout=1.5) as resp:
-                if resp.status == 200:
-                    chosen_port = p
-                    break
-        except Exception:
-            pass
-
-    return {
-        "pid": int(target_pid),
-        "ls_address": f"localhost:{chosen_port}",
-        "csrf_token": csrf_token,
-    }
+PI_BIN = "/Users/huanghaodong/.npm-global/bin/pi"
+DEFAULT_PI_MODEL = "local-gateway/claude-opus-5-5-high"
 
 
 class LoopDaemon:
@@ -84,13 +29,17 @@ class LoopDaemon:
         self,
         root_dir: str = "/Users/huanghaodong/Desktop/project",
         state_dir: str = "/Users/huanghaodong/Desktop/project/.state",
+        pi_model: str = DEFAULT_PI_MODEL,
     ):
         self.root_dir = root_dir
         self.state_dir = state_dir
+        self.pi_model = pi_model
         self.pid_file = os.path.join(self.state_dir, "daemon.pid")
+        self.runner_pid_file = os.path.join(self.state_dir, "runner.pid")
         self.log_file = os.path.join(self.state_dir, "daemon.log")
         self.status_file = os.path.join(self.state_dir, "daemon_status.json")
         self.dispatch_state_file = os.path.join(self.state_dir, "dispatch_state.json")
+        self.pi_runs_dir = os.path.join(self.state_dir, "pi_runs")
         self.collector = ConversationCollector()
         self.planner = WeeklyPlanner(state_dir=self.state_dir)
         self.git_sync = GitHubSyncManager(root_dir=self.root_dir, state_dir=self.state_dir)
@@ -109,7 +58,13 @@ class LoopDaemon:
                     return json.load(f)
             except Exception:
                 pass
-        return {"last_dispatch_date": "", "dispatched_milestones": {}}
+        return {
+            "engine": "pi",
+            "model": self.pi_model,
+            "last_dispatch_date": "",
+            "active_milestone": None,
+            "dispatched_milestones": {},
+        }
 
     def _save_dispatch_state(self, state: Dict) -> None:
         os.makedirs(self.state_dir, exist_ok=True)
@@ -119,71 +74,192 @@ class LoopDaemon:
         os.replace(tmp, self.dispatch_state_file)
 
     def build_milestone_prompt(self, project: PlannedProject, milestone: CommitMilestone) -> str:
-        """Construct the actionable prompt pushed by the script to wake up the model."""
+        """Construct the self-contained prompt pushed by the script to wake up Pi (`claude-opus-5-5-high`)."""
         recent_sigs = project.dynamic_signals[-5:] if project.dynamic_signals else []
         sigs_text = "\n".join(
             f"- [{s.get('date')}] ({s.get('source_type')}) {s.get('title')}" for s in recent_sigs
-        ) or "- 无新增对话信号，按周计划既定 Milestone 推进"
+        ) or "- 按周计划既定 Milestone 推进"
 
-        return (
-            f"【Loop Engineer 每日自动造物任务（免读写 recent-conversations.md）】\n"
-            f"当前目标项目：`{project.repo_name}`（模式：`{project.mode}`，本地目录：`{project.local_target_dir}`）\n"
-            f"项目定位：{project.tagline}\n"
-            f"背景来源：{project.origin_context}\n"
-            f"近期关联对话与日记信号：\n{sigs_text}\n\n"
-            f"请立即执行 Milestone `{milestone.milestone_id}`：\n"
-            f"1. 在 `{project.local_target_dir}` 下实现交付文件：`{', '.join(milestone.deliverables)}`；\n"
-            f"2. 运行 `pytest -q` 确保全部测试 100% 通过，并通过 `PrivacyGate` 隐私检查；\n"
-            f"3. 使用 `GitHubSyncManager` 提交 Commit：`{milestone.commit_type}({milestone.scope}): {milestone.summary}`；\n"
-            f"4. 调用 `WeeklyPlanner().mark_milestone_completed('{milestone.milestone_id}', ...)` 标记完成，并推送至 `https://github.com/hd659/{project.repo_name}`；\n"
-            f"5. 完成后直接结束本轮对话（切勿启动任何定时器）。"
+        # For `self_optimize` projects like `netmap` that may contain private domain strings locally,
+        # instruct Pi to also sync a sanitized public copy or replace hardcoded private domain with env var.
+        privacy_note = (
+            "注意：如果目标目录已有文件中含私人网关域名或私人 IP，请将其改为 `os.environ.get('GATEWAY_PUBLIC_HOST', 'api.example.com')` 以通过 `PrivacyGate` 零泄漏检查（严禁将私人域名或 IP 推上公开 GitHub）。"
+            if project.mode == "self_optimize"
+            else "注意：所有代码与文档严禁包含任何私人邮箱、学号、真实 API Key 或私人域名（必须 100% 通过 `PrivacyGate` 检查）。"
         )
 
-    def dispatch_next_milestone_to_model(self, force: bool = False) -> Dict:
-        """Push the next actionable milestone to Antigravity (`agentapi`) to wake up the model on demand."""
+        return (
+            f"【Loop Engineer 自动造物任务 · 免读写 recent-conversations.md 与 Obsidian 知识库】\n"
+            f"当前目标仓库：`{project.repo_name}`\n"
+            f"引擎模式：`{project.mode}`\n"
+            f"本地目标目录：`{project.local_target_dir}`\n"
+            f"项目定位：{project.tagline}\n"
+            f"背景与痛点推导：{project.origin_context}\n"
+            f"技术栈：{', '.join(project.tech_stack)}\n"
+            f"关联对话信号：\n{sigs_text}\n\n"
+            f"{privacy_note}\n\n"
+            f"请立即完成 Milestone `{milestone.milestone_id}`：\n"
+            f"1. 确保目录 `{project.local_target_dir}` 存在，编写高质量、真实可运行的交付文件：`{', '.join(milestone.deliverables)}`（若已有相关文件则在其基础上演进升级，保持代码精炼硬核）；\n"
+            f"2. 在 `{project.local_target_dir}` 下运行 `/opt/anaconda3/bin/python3 -m pytest -q` 验证全部单元测试 100% 通过；\n"
+            f"3. 在 `/Users/huanghaodong/Desktop/project` 下调用 Python 执行提交与推送：\n"
+            f"```python\n"
+            f"import time, sys\n"
+            f"sys.path.insert(0, '/Users/huanghaodong/Desktop/project')\n"
+            f"from loop_engineer.github_sync import GitHubSyncManager\n"
+            f"from loop_engineer.planner import WeeklyPlanner\n"
+            f"sync = GitHubSyncManager()\n"
+            f"sync.ensure_git_repo('{project.local_target_dir}')\n"
+            f"# 若目录内有未跟踪的核心源码也可一并加入\n"
+            f"ok, rev = sync.commit_files('{project.local_target_dir}', {milestone.deliverables!r}, '{milestone.commit_type}({milestone.scope}): {milestone.summary}')\n"
+            f"ok_push, msg = sync.push_or_create_remote('{project.local_target_dir}', '{project.repo_name}', {project.tagline!r})\n"
+            f"WeeklyPlanner().mark_milestone_completed('{milestone.milestone_id}', time.strftime('%Y-%m-%dT%H:%M:%S%z'))\n"
+            f"print('COMMIT:', ok, rev, 'PUSH:', ok_push, msg)\n"
+            f"```\n"
+            f"4. 执行完成后直接输出简短总结并结束，不要询问用户。"
+        )
+
+    def dispatch_next_milestone_to_model(self, force: bool = False, repo_name: Optional[str] = None) -> Dict:
+        """Invoke Pi Agent (`pi --print --model local-gateway/claude-opus-5-5-high`) to execute the next milestone."""
         today = time.strftime("%Y-%m-%d")
         dstate = self._load_dispatch_state()
         if not force and dstate.get("last_dispatch_date") == today:
-            return {"dispatched": False, "reason": f"Already dispatched a build today ({today})."}
+            return {"dispatched": False, "reason": f"Already dispatched today ({today}). Use --force to run now."}
 
-        next_item = self.planner.next_actionable_milestone()
+        next_item = self.planner.next_actionable_milestone(repo_name=repo_name)
         if not next_item:
             return {"dispatched": False, "reason": "All planned milestones completed."}
 
         proj: PlannedProject = next_item["project"]
         ms: CommitMilestone = next_item["milestone"]
+        os.makedirs(proj.local_target_dir, exist_ok=True)
+        os.makedirs(self.pi_runs_dir, exist_ok=True)
+
         title = f"[LoopBuild {today}] {proj.repo_name} · {ms.milestone_id}"
         prompt = self.build_milestone_prompt(proj, ms)
-
-        bridge = discover_antigravity_bridge()
-        if not bridge or not os.path.exists(AGENTAPI_BIN):
-            self.log(f"Antigravity bridge unavailable; queued prompt for {ms.milestone_id}")
-            return {"dispatched": False, "reason": "Antigravity language_server not running."}
+        run_log_path = os.path.join(self.pi_runs_dir, f"{ms.milestone_id}.log")
 
         env = dict(os.environ)
-        env.pop("ANTIGRAVITY_SOURCE_METADATA", None)
-        env.pop("ANTIGRAVITY_CONVERSATION_ID", None)
-        env.pop("ANTIGRAVITY_TRAJECTORY_ID", None)
-        env["ANTIGRAVITY_LS_ADDRESS"] = bridge["ls_address"]
-        env["ANTIGRAVITY_CSRF_TOKEN"] = bridge["csrf_token"]
+        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:/Users/huanghaodong/.npm-global/bin:/opt/anaconda3/bin:{env.get('PATH', '')}"
 
-        cmd = [AGENTAPI_BIN, "new-conversation", "--title", title, "--", prompt]
-        out = subprocess.check_output(cmd, env=env, cwd=self.root_dir, text=True, timeout=20)
-        resp = json.loads(out) if out.strip() else {}
-        conv_id = (
-            ((resp.get("response") or {}).get("newConversation") or {}).get("conversationId")
-            or resp.get("conversationId")
-            or ""
-        )
-        dstate["last_dispatch_date"] = today
-        dstate["dispatched_milestones"][ms.milestone_id] = {
-            "conversation_id": conv_id,
-            "date": today,
-            "title": title,
+        cmd = [
+            PI_BIN,
+            "--print",
+            "--model",
+            self.pi_model,
+            "--no-mcp",
+            "--name",
+            title,
+            "--",
+            prompt,
+        ]
+
+        dstate["active_milestone"] = {
+            "milestone_id": ms.milestone_id,
+            "repo_name": proj.repo_name,
+            "model": self.pi_model,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "log_file": run_log_path,
         }
         self._save_dispatch_state(dstate)
-        self.log(f"Dispatched {ms.milestone_id} ({proj.repo_name}) to model conversation {conv_id}")
-        return {"dispatched": True, "conversation_id": conv_id, "milestone_id": ms.milestone_id, "title": title}
+        self.log(f"Launching Pi ({self.pi_model}) for {proj.repo_name} :: {ms.milestone_id} -> {run_log_path}")
+
+        with open(run_log_path, "w", encoding="utf-8") as log_f:
+            log_f.write(f"=== {title} | model={self.pi_model} ===\n\n")
+            log_f.flush()
+            proc = subprocess.run(
+                cmd,
+                cwd=proj.local_target_dir,
+                env=env,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=1200,
+            )
+
+        dstate = self._load_dispatch_state()
+        dstate["last_dispatch_date"] = today
+        dstate["active_milestone"] = None
+        dstate["dispatched_milestones"][ms.milestone_id] = {
+            "repo_name": proj.repo_name,
+            "model": self.pi_model,
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "exit_code": proc.returncode,
+            "log_file": run_log_path,
+        }
+        self._save_dispatch_state(dstate)
+        self.log(f"Finished Pi ({self.pi_model}) for {ms.milestone_id} (exit_code={proc.returncode})")
+        return {
+            "dispatched": True,
+            "engine": "pi",
+            "model": self.pi_model,
+            "repo_name": proj.repo_name,
+            "milestone_id": ms.milestone_id,
+            "exit_code": proc.returncode,
+            "log_file": run_log_path,
+        }
+
+    def run_all_pending_milestones(self, max_count: int = 20) -> List[Dict]:
+        """Sequentially execute all pending milestones across the weekly plan using Pi (`claude-opus-5-5-high`)."""
+        results: List[Dict] = []
+        for _ in range(max_count):
+            nxt = self.planner.next_actionable_milestone()
+            if not nxt:
+                break
+            ms_id = nxt["milestone"].milestone_id
+            res = self.dispatch_next_milestone_to_model(force=True)
+            results.append(res)
+            # Safety guard: if Pi exited without marking milestone completed, avoid infinite loop on same milestone
+            after = self.planner.next_actionable_milestone()
+            if after and after["milestone"].milestone_id == ms_id:
+                self.log(f"Milestone {ms_id} remained pending after Pi run; stopping sequential runner for inspection.")
+                break
+        return results
+
+    def start_plan_runner_detached(self, max_count: int = 20) -> int:
+        """Fork a background runner that executes pending milestones via Pi (`claude-opus-5-5-high`)."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        if os.path.exists(self.runner_pid_file):
+            try:
+                old_pid = int(open(self.runner_pid_file, "r", encoding="utf-8").read().strip())
+                os.kill(old_pid, 0)
+                return old_pid
+            except Exception:
+                pass
+
+        pid1 = os.fork()
+        if pid1 > 0:
+            time.sleep(0.3)
+            try:
+                return int(open(self.runner_pid_file, "r", encoding="utf-8").read().strip())
+            except Exception:
+                return pid1
+
+        os.setsid()
+        pid2 = os.fork()
+        if pid2 > 0:
+            os._exit(0)
+
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull_fd, 0)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        if devnull_fd > 2:
+            os.close(devnull_fd)
+
+        with open(self.runner_pid_file, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+
+        self.log(f"Started Pi (`{self.pi_model}`) batch plan runner (PID={os.getpid()}, max_count={max_count})")
+        try:
+            self.run_all_pending_milestones(max_count=max_count)
+        except Exception as exc:
+            self.log(f"Batch runner error: {exc}")
+        finally:
+            try:
+                os.remove(self.runner_pid_file)
+            except OSError:
+                pass
+        os._exit(0)
 
     def run_poll_and_sync_cycle(self, auto_dispatch: bool = False) -> Dict:
         """Execute one silent collection + backlog enrichment pass (0 LLM tokens unless auto_dispatch triggers)."""
@@ -206,7 +282,6 @@ class LoopDaemon:
 
         dispatch_res = None
         if auto_dispatch:
-            # Trigger daily model build once per new calendar day (after 11:00 AM local time)
             current_hour = int(time.strftime("%H"))
             if current_hour >= 11:
                 try:
@@ -217,6 +292,8 @@ class LoopDaemon:
         status_payload = {
             "last_poll_ts": int(time.time()),
             "last_poll_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "engine": "pi",
+            "pi_model": self.pi_model,
             "total_signals_collected": len(signals),
             "newly_ingested_by_repo": ingested,
             "next_actionable_milestone": next_summary,
@@ -266,13 +343,7 @@ class LoopDaemon:
         with open(self.pid_file, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
 
-        # Record today (2026-10-25) as already dispatched since Day 1 (`loop-engineer`) is already pushed!
-        dstate = self._load_dispatch_state()
-        if not dstate.get("last_dispatch_date"):
-            dstate["last_dispatch_date"] = time.strftime("%Y-%m-%d")
-            self._save_dispatch_state(dstate)
-
-        self.log(f"Started loop-engineer daemon (PID={os.getpid()}, interval={interval_seconds}s)")
+        self.log(f"Started loop-engineer daemon (PID={os.getpid()}, engine=pi, model={self.pi_model}, interval={interval_seconds}s)")
         while True:
             try:
                 self.run_poll_and_sync_cycle(auto_dispatch=True)
