@@ -49,28 +49,30 @@ def test_weekly_planner_ingests_signals_and_tracks_milestones():
     with tempfile.TemporaryDirectory() as tmpdir:
         planner = WeeklyPlanner(state_dir=tmpdir)
         projects = planner.load_or_init_projects()
-        assert len(projects) == 5
+        assert len(projects) == 6
+        modes = {p.mode for p in projects}
+        assert modes == {"self_optimize", "extrapolate_new"}
 
         dummy_signal = EngineeringSignal(
             signal_id="conv-12345",
             date="2026-10-25",
             source_type="recent_conversation",
-            title="Fix BrokenPipe usage accounting on gateway",
-            summary="Ensure token telemetry is preserved when client disconnects early.",
-            pillar="ai-infra-harness",
+            title="Troubleshoot Wi-Fi and Misty proxy routing",
+            summary="Check IPv6 and split-tunnel routing on home network.",
+            pillar="workflow-mcp",
             source_path="/tmp/mock.md",
         )
         counts = planner.ingest_signals([dummy_signal])
-        assert counts["perishable-quota-router"] == 1
+        assert counts["netmap"] == 1
 
-        next_item = planner.next_actionable_milestone(repo_name="loop-engineer")
+        next_item = planner.next_actionable_milestone(repo_name="netmap")
         assert next_item is not None
         ms_id = next_item["milestone"].milestone_id
-        assert ms_id == "le-m1"
+        assert ms_id == "nm-m1"
 
         assert planner.mark_milestone_completed(ms_id, "2026-10-25T00:45:00+08:00")
-        next_after = planner.next_actionable_milestone(repo_name="loop-engineer")
-        assert next_after["milestone"].milestone_id == "le-m2"
+        next_after = planner.next_actionable_milestone(repo_name="netmap")
+        assert next_after["milestone"].milestone_id == "nm-m2"
 
 
 def test_git_sync_commit_and_author_rewrite():
