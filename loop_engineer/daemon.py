@@ -141,12 +141,17 @@ class LoopDaemon:
         env = dict(os.environ)
         env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:/Users/huanghaodong/.npm-global/bin:/opt/anaconda3/bin:{env.get('PATH', '')}"
 
+        project_session_dir = "/Users/huanghaodong/.pi/agent/sessions/--Users-huanghaodong-Desktop-project--"
+        os.makedirs(project_session_dir, exist_ok=True)
+
         cmd = [
             PI_BIN,
             "--print",
             "--model",
             self.pi_model,
             "--no-mcp",
+            "--session-dir",
+            project_session_dir,
             "--name",
             title,
             "--",
