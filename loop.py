@@ -112,6 +112,13 @@ def cmd_daemon(args):
         daemon.run_poll_and_sync_cycle()
 
 
+def cmd_trigger(args):
+    daemon = LoopDaemon()
+    daemon.run_poll_and_sync_cycle(auto_dispatch=False)
+    res = daemon.dispatch_next_milestone_to_model(force=args.force)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description="loop-engineer CLI")
     sub = parser.add_subparsers(dest="cmd")
@@ -119,6 +126,9 @@ def main():
     sub.add_parser("status", help="Poll sources and display current loop status")
     sub.add_parser("poll", help="Run a collection and backlog ingestion pass")
     sub.add_parser("plan", help="Display the 7-day flagship project schedule")
+
+    p_trig = sub.add_parser("trigger", help="Immediately push the next milestone task to wake up the model")
+    p_trig.add_argument("--force", action="store_true", help="Dispatch even if today already ran")
 
     p_bind = sub.add_parser("bind-github", help="Bind a blank GitHub account and push repositories")
     p_bind.add_argument("--username", default="", help="New GitHub username")
@@ -140,6 +150,8 @@ def main():
         cmd_bind_github(args)
     elif args.cmd == "daemon":
         cmd_daemon(args)
+    elif args.cmd == "trigger":
+        cmd_trigger(args)
     else:
         parser.print_help()
         sys.exit(1)
