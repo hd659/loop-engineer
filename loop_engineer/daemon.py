@@ -97,9 +97,10 @@ class LoopDaemon:
             f"背景与痛点推导：{project.origin_context}\n"
             f"技术栈：{', '.join(project.tech_stack)}\n"
             f"关联对话信号：\n{sigs_text}\n\n"
-            f"{privacy_note}\n\n"
+            f"{privacy_note}\n"
+            f"【防截断硬约束（必读）】网关单次响应上限为 `max_tokens=20480`。请保持每个源码/测试文件精炼高内聚（严格控制在 `100~200` 行以内），**每轮只调用 1 次 `write` 工具写 1 个文件**，分多轮依次写完 `{', '.join(milestone.deliverables)}`，严禁在单轮中一次性输出超长代码导致 `stopReason=length` 截断！\n\n"
             f"请立即完成 Milestone `{milestone.milestone_id}`：\n"
-            f"1. 确保目录 `{project.local_target_dir}` 存在，编写高质量、真实可运行的交付文件：`{', '.join(milestone.deliverables)}`（若已有相关文件则在其基础上演进升级，保持代码精炼硬核）；\n"
+            f"1. 确保目录 `{project.local_target_dir}` 存在，分步编写高质量、真实可运行的交付文件：`{', '.join(milestone.deliverables)}`（若已有相关文件则在其基础上演进升级，保持代码精炼硬核）；\n"
             f"2. 在 `{project.local_target_dir}` 下运行 `/opt/anaconda3/bin/python3 -m pytest -q` 验证全部单元测试 100% 通过；\n"
             f"3. 在 `/Users/huanghaodong/Desktop/project` 下调用 Python 执行提交与推送：\n"
             f"```python\n"
@@ -149,6 +150,8 @@ class LoopDaemon:
             "--print",
             "--model",
             self.pi_model,
+            "--thinking",
+            "low",
             "--no-mcp",
             "--session-dir",
             project_session_dir,
@@ -206,6 +209,7 @@ class LoopDaemon:
     def run_all_pending_milestones(self, max_count: int = 20) -> List[Dict]:
         """Sequentially execute all pending milestones across the weekly plan using Pi (`claude-opus-5-5-high`)."""
         results: List[Dict] = []
+        retry_counts: Dict[str, int] = {}
         for _ in range(max_count):
             nxt = self.planner.next_actionable_milestone()
             if not nxt:
@@ -213,11 +217,15 @@ class LoopDaemon:
             ms_id = nxt["milestone"].milestone_id
             res = self.dispatch_next_milestone_to_model(force=True)
             results.append(res)
-            # Safety guard: if Pi exited without marking milestone completed, avoid infinite loop on same milestone
+            # Safety guard: allow up to 2 attempts per milestone in case of transient 429 or length truncation
             after = self.planner.next_actionable_milestone()
             if after and after["milestone"].milestone_id == ms_id:
-                self.log(f"Milestone {ms_id} remained pending after Pi run; stopping sequential runner for inspection.")
-                break
+                retry_counts[ms_id] = retry_counts.get(ms_id, 0) + 1
+                if retry_counts[ms_id] >= 2:
+                    self.log(f"Milestone {ms_id} remained pending after 2 Pi runs; stopping sequential runner for inspection.")
+                    break
+                self.log(f"Milestone {ms_id} still pending after attempt 1; sleeping 5s and retrying once...")
+                time.sleep(5)
         return results
 
     def start_plan_runner_detached(self, max_count: int = 20) -> int:
