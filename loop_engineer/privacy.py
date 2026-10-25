@@ -47,7 +47,7 @@ DEFAULT_RULES: List[RedactionRule] = [
     RedactionRule(
         name="campus_and_personal_email",
         pattern=re.compile(
-            r"\b(?:hhua0127@student\.monash\.edu|huahado@outlook\.com|hufghjuggh@gmail\.com|hadohua6@gmail\.com|s01086538745@gmail\.com)\b",
+            r"\b(?:hhua0127@student\.monash\.edu|huahado@outlook\.com|hufghjuggh@gmail\.com|hadohua6@gmail\.com|s01086538745@gmail\.com|MattiasHassen235@outlook\.com|HuseDependable88@outlook\.com)\b",
             re.IGNORECASE,
         ),
         replacement="builder@example.com",
@@ -64,7 +64,9 @@ DEFAULT_RULES: List[RedactionRule] = [
     ),
     RedactionRule(
         name="private_ips_and_hosts",
-        pattern=re.compile(r"\b(?:101\.230\.211\.50|100\.97\.155\.10|api\.831800\.xyz|HuangHaodong_5Ghz)\b"),
+        pattern=re.compile(
+            r"\b(?:101\.230\.211\.50|100\.97\.155\.10|48\.45\.161\.147|50\.114\.32\.105|api\.831800\.xyz|HuangHaodong_5Ghz)\b"
+        ),
         replacement="node.example.net",
     ),
 ]

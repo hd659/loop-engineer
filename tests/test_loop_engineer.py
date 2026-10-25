@@ -75,6 +75,57 @@ def test_weekly_planner_ingests_signals_and_tracks_milestones():
         assert next_after["milestone"].milestone_id == "nm-m2"
 
 
+def test_signal_synthesizer_creates_new_projects_and_merges_llm_plan():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        planner = WeeklyPlanner(state_dir=tmpdir)
+        planner.load_or_init_projects()
+
+        new_signals = [
+            EngineeringSignal(
+                signal_id="conv-vault-01",
+                date="2026-10-25",
+                source_type="recent_conversation",
+                title="落地私有邮箱与 OAuth 令牌保险箱及免 AdsPower 浏览器启动器",
+                summary="支持微软 OAuth2 IMAP 提取 6 位验证码与 Magic Link，固定端口 SOCKS5 桥接。",
+                pillar="ai-infra-harness",
+                source_path="/tmp/mock.md",
+            ),
+            EngineeringSignal(
+                signal_id="conv-omni-02",
+                date="2026-10-25",
+                source_type="recent_conversation",
+                title="解析 omni-moderation 内容安全前置审核与满 3 次自动进蜜罐 Tarpit 机制",
+                summary="剥离代码块实现零误伤，三次违规拉入 Tarpit。",
+                pillar="ai-infra-harness",
+                source_path="/tmp/mock.md",
+            ),
+        ]
+        created = planner.auto_synthesize_from_signals(new_signals)
+        assert "oie-m1" in created
+        assert "let-m1" in created
+
+        llm_added = planner.merge_llm_synthesized_plan(
+            [
+                {
+                    "repo_name": "custom-synth-repo",
+                    "pillar": "ai-infra-harness",
+                    "mode": "extrapolate_new",
+                    "tagline": "Test synthesized repo",
+                    "milestones": [
+                        {
+                            "milestone_id": "csr-m1",
+                            "commit_type": "feat",
+                            "scope": "core",
+                            "summary": "implement core logic",
+                            "deliverables": ["csr/core.py", "tests/test_core.py"],
+                        }
+                    ],
+                }
+            ]
+        )
+        assert llm_added == ["csr-m1"]
+
+
 def test_git_sync_commit_and_author_rewrite():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_dir = os.path.join(tmpdir, "repo")

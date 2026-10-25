@@ -291,7 +291,7 @@ class WeeklyPlanner:
                 target = by_name.get("loop-engineer", projects[0])
 
             existing_ids = {d.get("signal_id") for d in target.dynamic_signals}
-            if sig.signal_id not in existing_ids and len(target.dynamic_signals) < 15:
+            if sig.signal_id not in existing_ids and len(target.dynamic_signals) < 50:
                 target.dynamic_signals.append(
                     {
                         "signal_id": sig.signal_id,
@@ -303,7 +303,211 @@ class WeeklyPlanner:
                 added_counts[target.repo_name] += 1
 
         self.save_projects(projects)
+        self.auto_synthesize_from_signals(signals)
         return added_counts
+
+    def auto_synthesize_from_signals(self, signals: List[EngineeringSignal]) -> List[str]:
+        """
+        Deterministically synthesize new projects and milestones from newly collected conversation signals
+        so that daily engineering discussions continuously expand the actionable backlog.
+        """
+        projects = self.load_or_init_projects()
+        by_name = {p.repo_name: p for p in projects}
+        all_ms_ids = {m.milestone_id for p in projects for m in p.milestones}
+        created_ms: List[str] = []
+
+        combined_text = " ".join(f"{s.title} {s.summary}" for s in signals).lower()
+
+        # 1. OAuth2 IMAP OTP & Stealth Browser Profile Bridge (from 2026-10-25 Mailbox Vault & Browser Launcher)
+        if any(k in combined_text for k in ("邮箱保险箱", "oauth", "imap", "adspower", "browser_launcher", "magic link")):
+            if "oauth-imap-otp-extractor" not in by_name:
+                proj = PlannedProject(
+                    repo_name="oauth-imap-otp-extractor",
+                    pillar="ai-infra-harness",
+                    mode="extrapolate_new",
+                    local_target_dir="/Users/huanghaodong/Desktop/project/workspaces/oauth-imap-otp-extractor",
+                    tagline="[New Extrapolated Project] Zero-GUI XOAUTH2 IMAP OTP/Magic-Link extractor & isolated SOCKS5 browser profile launcher.",
+                    origin_context=(
+                        "Synthesized from 2026-10-25 conversations on building a private Mailbox & OAuth2 Token Vault "
+                        "(direct Microsoft OAuth2 IMAP 6-digit OTP and Magic Link extraction) and an AdsPower-free "
+                        "isolated US residential SOCKS5 Chromium profile launcher."
+                    ),
+                    scheduled_days=["2026-10-26 (Wave 2)"],
+                    tech_stack=["Python", "IMAP4/XOAUTH2", "SOCKS5", "PyTest"],
+                    milestones=[
+                        CommitMilestone(
+                            milestone_id="oie-m1",
+                            commit_type="feat",
+                            scope="imap-xoauth2",
+                            summary="implement XOAUTH2 access-token refresher and deterministic 6-digit OTP & magic-link MIME parser",
+                            deliverables=["otp_vault/imap_xoauth2.py", "tests/test_imap_xoauth2.py"],
+                        ),
+                        CommitMilestone(
+                            milestone_id="oie-m2",
+                            commit_type="feat",
+                            scope="stealth-bridge",
+                            summary="build deterministic per-slot SOCKS5 port allocator and timezone/locale isolated Chromium flag builder",
+                            deliverables=["otp_vault/stealth_bridge.py", "tests/test_stealth_bridge.py", "README.md"],
+                        ),
+                    ],
+                )
+                projects.append(proj)
+                by_name[proj.repo_name] = proj
+                created_ms.extend(["oie-m1", "oie-m2"])
+
+        # 2. Zero-Latency LLM Content Moderation & Tarpit Router (from 2026-10-25 omni-moderation & Tarpit)
+        if any(k in combined_text for k in ("omni-moderation", "omini", "蜜罐", "tarpit", "酒馆", "前置审核")):
+            if "llm-edge-tarpit-guard" not in by_name:
+                proj = PlannedProject(
+                    repo_name="llm-edge-tarpit-guard",
+                    pillar="ai-infra-harness",
+                    mode="extrapolate_new",
+                    local_target_dir="/Users/huanghaodong/Desktop/project/workspaces/llm-edge-tarpit-guard",
+                    tagline="[New Extrapolated Project] Zero-latency code-aware LLM moderation filter & 3-strike SSE tarpit router.",
+                    origin_context=(
+                        "Synthesized from 2026-10-25 conversations on reverse-engineering `omni-moderation-latest` "
+                        "edge filtering: stripping Markdown code blocks and tool_result blocks to guarantee 0% false "
+                        "positives on coding prompts while routing 3-strike policy violators into a progressive tarpit."
+                    ),
+                    scheduled_days=["2026-10-26 (Wave 2)", "2026-10-27 (Wave 2)"],
+                    tech_stack=["Python", "Regex/AST", "SSE", "PyTest"],
+                    milestones=[
+                        CommitMilestone(
+                            milestone_id="let-m1",
+                            commit_type="feat",
+                            scope="moderation",
+                            summary="implement code-block & tool-result stripper with weighted jailbreak/moderation risk scorer",
+                            deliverables=["edge_guard/moderation_filter.py", "tests/test_moderation_filter.py"],
+                        ),
+                        CommitMilestone(
+                            milestone_id="let-m2",
+                            commit_type="feat",
+                            scope="tarpit",
+                            summary="implement 3-strike sliding-window state machine and progressive latency tarpit policy router",
+                            deliverables=["edge_guard/tarpit_router.py", "tests/test_tarpit_router.py", "README.md"],
+                        ),
+                    ],
+                )
+                projects.append(proj)
+                by_name[proj.repo_name] = proj
+                created_ms.extend(["let-m1", "let-m2"])
+
+        # 3. Prompt Prefix-Cache Invalidation Doctor & Cost Simulator (from 2026-10-25 Prefix Caching & 1.0x Billing)
+        if any(k in combined_text for k in ("prefix caching", "cached_tokens", "缓存命中", "百分比显示", "haiku", "降级")):
+            if "prompt-cache-doctor" not in by_name:
+                proj = PlannedProject(
+                    repo_name="prompt-cache-doctor",
+                    pillar="ai-infra-harness",
+                    mode="extrapolate_new",
+                    local_target_dir="/Users/huanghaodong/Desktop/project/workspaces/prompt-cache-doctor",
+                    tagline="[New Extrapolated Project] LLM prompt prefix-cache invalidation detector, payload rewriter & tier-downgrade cost simulator.",
+                    origin_context=(
+                        "Synthesized from 2026-10-25 root-cause analysis where placing volatile per-turn JSON state "
+                        "ahead of a 27K static rulebook truncated OpenAI/Anthropic prefix caching at 3,200 tokens, "
+                        "combined with 1.0x vs 0.1x cache_read billing and Opus-to-Haiku tier downgrade economics."
+                    ),
+                    scheduled_days=["2026-10-27 (Wave 2)", "2026-10-28 (Wave 2)"],
+                    tech_stack=["Python", "JSON-Diff", "Tokenizers", "PyTest"],
+                    milestones=[
+                        CommitMilestone(
+                            milestone_id="pcd-m1",
+                            commit_type="feat",
+                            scope="prefix-diff",
+                            summary="detect volatile token mutations across multi-turn LLM payloads and pinpoint prefix-cache break offset",
+                            deliverables=["cache_doctor/prefix_analyzer.py", "tests/test_prefix_analyzer.py"],
+                        ),
+                        CommitMilestone(
+                            milestone_id="pcd-m2",
+                            commit_type="feat",
+                            scope="optimizer",
+                            summary="reorder dynamic state blocks behind static system prefixes and compute cache-hit percentage & USD savings",
+                            deliverables=["cache_doctor/payload_optimizer.py", "tests/test_payload_optimizer.py", "README.md"],
+                        ),
+                    ],
+                )
+                projects.append(proj)
+                by_name[proj.repo_name] = proj
+                created_ms.extend(["pcd-m1", "pcd-m2"])
+
+        # 4. Evolve `submission-truth-auditor` with Temporal Drift & Treap Invariant Auditor (from 2026-10-25 FIT1008 HD2 & FIT1061 C4)
+        if any(k in combined_text for k in ("treap", "hd2", "model card", "偏移", "碳排")):
+            if "submission-truth-auditor" in by_name and "sta-m3" not in all_ms_ids:
+                by_name["submission-truth-auditor"].milestones.append(
+                    CommitMilestone(
+                        milestone_id="sta-m3",
+                        commit_type="feat",
+                        scope="drift-treap",
+                        summary="add temporal concept-drift recall degradation auditor, carbon amortization calculator, and Treap invariant verifier",
+                        deliverables=["truth_auditor/drift_and_treap.py", "tests/test_drift_and_treap.py"],
+                    )
+                )
+                created_ms.append("sta-m3")
+
+        if created_ms:
+            self.save_projects(projects)
+        return created_ms
+
+    def merge_llm_synthesized_plan(self, items: List[Dict]) -> List[str]:
+        """Merge LLM-synthesized projects or milestones into `backlog.json` without overwriting existing work."""
+        projects = self.load_or_init_projects()
+        by_name = {p.repo_name: p for p in projects}
+        all_ms_ids = {m.milestone_id for p in projects for m in p.milestones}
+        added_ms: List[str] = []
+
+        for raw in items:
+            repo_name = str(raw.get("repo_name") or "").strip().lower()
+            if not repo_name:
+                continue
+            raw_milestones = raw.get("milestones") or []
+            new_ms_objs: List[CommitMilestone] = []
+            for m in raw_milestones:
+                ms_id = str(m.get("milestone_id") or "").strip()
+                if not ms_id or ms_id in all_ms_ids:
+                    continue
+                deliverables = [str(d) for d in (m.get("deliverables") or []) if d]
+                if not deliverables:
+                    continue
+                new_ms_objs.append(
+                    CommitMilestone(
+                        milestone_id=ms_id,
+                        commit_type=str(m.get("commit_type") or "feat"),
+                        scope=str(m.get("scope") or "core"),
+                        summary=str(m.get("summary") or "add synthesized module and unit tests"),
+                        deliverables=deliverables,
+                        status="pending",
+                    )
+                )
+                all_ms_ids.add(ms_id)
+                added_ms.append(ms_id)
+
+            if not new_ms_objs:
+                continue
+
+            if repo_name in by_name:
+                by_name[repo_name].milestones.extend(new_ms_objs)
+            else:
+                mode = str(raw.get("mode") or "extrapolate_new")
+                target_dir = str(
+                    raw.get("local_target_dir")
+                    or f"/Users/huanghaodong/Desktop/project/workspaces/{repo_name}"
+                )
+                proj = PlannedProject(
+                    repo_name=repo_name,
+                    pillar=str(raw.get("pillar") or "ai-infra-harness"),
+                    mode=mode,
+                    local_target_dir=target_dir,
+                    tagline=str(raw.get("tagline") or f"[New Extrapolated Project] {repo_name}"),
+                    origin_context=str(raw.get("origin_context") or "Synthesized from recent agent conversations."),
+                    scheduled_days=[str(raw.get("scheduled_day") or "Dynamic Queue")],
+                    tech_stack=[str(t) for t in (raw.get("tech_stack") or ["Python", "PyTest"])],
+                    milestones=new_ms_objs,
+                )
+                projects.append(proj)
+                by_name[repo_name] = proj
+
+        if added_ms:
+            self.save_projects(projects)
+        return added_ms
 
     def next_actionable_milestone(self, repo_name: Optional[str] = None) -> Optional[Dict]:
         """Return the next pending milestone across the weekly plan (or for a specific repo)."""

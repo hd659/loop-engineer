@@ -41,16 +41,20 @@ class ConversationCollector:
     def __init__(
         self,
         recent_conv_path: str = "/Users/huanghaodong/Documents/Obsidian Vault/08-topics/recent-conversations.md",
+        archive_conv_path: str = "/Users/huanghaodong/Documents/Obsidian Vault/08-topics/recent-conversations-archive.md",
         diary_dir: str = "/Users/huanghaodong/Documents/diary",
         active_projects_dir: str = "/Users/huanghaodong/Documents/Obsidian Vault/01-projects/_active",
         agy_brain_dir: str = "/Users/huanghaodong/.gemini/antigravity/brain",
+        pi_sessions_dir: str = "/Users/huanghaodong/.pi/agent/sessions",
         persona: BuilderPersona = DEFAULT_PERSONA,
         privacy_gate: Optional[PrivacyGate] = None,
     ):
         self.recent_conv_path = recent_conv_path
+        self.archive_conv_path = archive_conv_path
         self.diary_dir = diary_dir
         self.active_projects_dir = active_projects_dir
         self.agy_brain_dir = agy_brain_dir
+        self.pi_sessions_dir = pi_sessions_dir
         self.persona = persona
         self.privacy_gate = privacy_gate or PrivacyGate()
 
@@ -59,25 +63,44 @@ class ConversationCollector:
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
         return f"{prefix}-{digest}"
 
-    def collect_recent_conversations(self) -> List[EngineeringSignal]:
-        """Parse `recent-conversations.md` entries into structured signals."""
-        if not os.path.exists(self.recent_conv_path):
+    @staticmethod
+    def _is_meta_loop_check(text: str) -> bool:
+        lowered = (text or "").lower()
+        ignore_phrases = (
+            "询问当前是否在做项目",
+            "你现在在做项目吗",
+            "为什么今天没有做任务",
+            "loop engineer 自动造物任务",
+            "[loopbuild ",
+            "诊断 `loop-engineer` 今日未自动执行",
+        )
+        return any(p in lowered for p in ignore_phrases)
+
+    def _parse_conversation_markdown(self, md_path: str, limit: int = 30) -> List[EngineeringSignal]:
+        if not os.path.exists(md_path):
             return []
-        with open(self.recent_conv_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        try:
+            with open(md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return []
 
         pattern = re.compile(
-            r"^###\s+(\d{4}-\d{2}-\d{2})\s+·\s+(.+?)\n"
-            r"(?:-\s+状态：.*\n)?"
-            r"(?:-\s+Agent：.*\n)?"
-            r"-\s+摘要：(.+?)(?=\n###\s+\d{4}-\d{2}-\d{2}|\Z)",
-            re.MULTILINE | re.DOTALL,
+            r"^###\s+(\d{4}-\d{2}-\d{2})\s+·\s+([^\n]+)\n"
+            r"(?:-\s+状态：[^\n]*\n)?"
+            r"(?:-\s+Agent：[^\n]*\n)?"
+            r"-\s+摘要：([^\n]+)",
+            re.MULTILINE,
         )
         signals: List[EngineeringSignal] = []
         for match in pattern.finditer(content):
+            if len(signals) >= limit:
+                break
             date_str = match.group(1).strip()
             raw_title = match.group(2).strip()
             raw_summary = re.sub(r"\s+", " ", match.group(3).strip())
+            if self._is_meta_loop_check(f"{raw_title} {raw_summary}"):
+                continue
 
             clean_title, hits1 = self.privacy_gate.sanitize_text(raw_title)
             clean_summary, hits2 = self.privacy_gate.sanitize_text(raw_summary)
@@ -92,11 +115,17 @@ class ConversationCollector:
                     title=clean_title,
                     summary=clean_summary,
                     pillar=pillar,
-                    source_path=self.recent_conv_path,
+                    source_path=md_path,
                     redacted_rules=combined_hits,
                 )
             )
         return signals
+
+    def collect_recent_conversations(self) -> List[EngineeringSignal]:
+        """Parse `recent-conversations.md` and recent entries of `recent-conversations-archive.md`."""
+        active = self._parse_conversation_markdown(self.recent_conv_path, limit=25)
+        archived = self._parse_conversation_markdown(self.archive_conv_path, limit=20)
+        return active + archived
 
     def collect_thought_diaries(self) -> List[EngineeringSignal]:
         """Parse cognitive models and commercial/quant insights from `~/Documents/diary/`."""
@@ -171,7 +200,7 @@ class ConversationCollector:
                                 req_match.group(1).strip() if req_match else raw_content.strip()
                             )
                             user_text = re.sub(r"\s+", " ", user_text)
-                            if len(user_text) < 15:
+                            if len(user_text) < 15 or self._is_meta_loop_check(user_text):
                                 continue
                             created_at = str(obj.get("created_at") or "2026-10-25")[:10]
                             clean_text, hits = self.privacy_gate.sanitize_text(user_text)
@@ -194,12 +223,74 @@ class ConversationCollector:
                 continue
         return signals
 
+    def collect_pi_sessions(self, max_sessions: int = 10) -> List[EngineeringSignal]:
+        """Scan recent Pi Client JSONL sessions for organic user prompts (skipping automated LoopBuild sessions)."""
+        if not os.path.isdir(self.pi_sessions_dir):
+            return []
+        candidates = []
+        for root, _, files in os.walk(self.pi_sessions_dir):
+            for fname in files:
+                if fname.endswith(".jsonl"):
+                    fpath = os.path.join(root, fname)
+                    try:
+                        candidates.append((os.path.getmtime(fpath), fname, fpath))
+                    except OSError:
+                        pass
+        candidates.sort(reverse=True)
+        signals: List[EngineeringSignal] = []
+
+        for _, fname, fpath in candidates[: max_sessions * 2]:
+            if len(signals) >= max_sessions:
+                break
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        obj = json.loads(line)
+                        if obj.get("type") == "session_info" and "[LoopBuild" in str(obj.get("name", "")):
+                            break
+                        if obj.get("type") == "message":
+                            msg = obj.get("message") or {}
+                            if msg.get("role") == "user":
+                                parts = msg.get("content") or []
+                                text_chunks = [
+                                    str(p.get("text", ""))
+                                    for p in parts
+                                    if isinstance(p, dict) and p.get("type") == "text"
+                                ]
+                                user_text = re.sub(r"\s+", " ", " ".join(text_chunks).strip())
+                                if len(user_text) < 15 or self._is_meta_loop_check(user_text):
+                                    break
+                                ts_str = str(obj.get("timestamp") or fname[:10])[:10]
+                                clean_text, hits = self.privacy_gate.sanitize_text(user_text)
+                                pillar = self.persona.classify_topic(clean_text)
+                                sig_id = self._make_id("pi", fname)
+                                signals.append(
+                                    EngineeringSignal(
+                                        signal_id=sig_id,
+                                        date=ts_str,
+                                        source_type="pi_session",
+                                        title=clean_text[:72],
+                                        summary=clean_text[:280],
+                                        pillar=pillar,
+                                        source_path=fpath,
+                                        redacted_rules=hits,
+                                    )
+                                )
+                                break
+            except Exception:
+                continue
+        return signals
+
     def collect_all(self) -> List[EngineeringSignal]:
         """Collect and deduplicate signals across all local sources."""
         all_signals = (
             self.collect_recent_conversations()
             + self.collect_thought_diaries()
             + self.collect_recent_transcripts()
+            + self.collect_pi_sessions()
         )
         seen = set()
         unique: List[EngineeringSignal] = []

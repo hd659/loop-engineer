@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 
-from loop_engineer.daemon import DEFAULT_PI_MODEL, LoopDaemon
+from loop_engineer.daemon import DEFAULT_DAILY_QUOTA, DEFAULT_PI_MODEL, LoopDaemon
 from loop_engineer.github_sync import GH_BIN, GitHubSyncManager
 from loop_engineer.planner import WeeklyPlanner
 
@@ -101,12 +101,34 @@ def cmd_bind_github(args):
 
 
 def cmd_daemon(args):
-    daemon = LoopDaemon(pi_model=args.model)
+    daemon = LoopDaemon(pi_model=args.model, daily_quota=args.daily_quota)
     if args.detach:
         pid = daemon.start_detached(interval_seconds=args.interval)
-        print(f"Loop daemon running in background (PID={pid}, model={args.model}, interval={args.interval}s).")
+        print(
+            f"Loop daemon running in background (PID={pid}, model={args.model}, "
+            f"daily_quota={args.daily_quota}, interval={args.interval}s)."
+        )
     else:
-        daemon.run_poll_and_sync_cycle()
+        daemon.run_poll_and_sync_cycle(auto_dispatch=True)
+
+
+def cmd_synthesize(args):
+    daemon = LoopDaemon(pi_model=args.model)
+    signals = daemon.collector.collect_all()
+    det_added = daemon.planner.auto_synthesize_from_signals(signals)
+    llm_added = daemon.synthesize_milestones_via_pi(signals) if args.llm else []
+    print(
+        json.dumps(
+            {
+                "signals_scanned": len(signals),
+                "deterministic_milestones_added": det_added,
+                "llm_milestones_added": llm_added,
+                "next_actionable": daemon.planner.next_actionable_milestone() is not None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def cmd_trigger(args):
@@ -154,8 +176,13 @@ def main():
 
     p_daemon = sub.add_parser("daemon", help="Start or run the background loop daemon")
     p_daemon.add_argument("--interval", type=int, default=3600, help="Polling interval in seconds")
+    p_daemon.add_argument("--daily-quota", type=int, default=DEFAULT_DAILY_QUOTA, help="Max milestones to auto-dispatch per day")
     p_daemon.add_argument("--model", default=DEFAULT_PI_MODEL, help="Pi model identifier")
     p_daemon.add_argument("--detach", action="store_true", help="Detach daemon into background")
+
+    p_synth = sub.add_parser("synthesize", help="Synthesize new projects/milestones from latest conversations")
+    p_synth.add_argument("--llm", action="store_true", help="Also invoke Pi (Opus 5.5) for dynamic synthesis")
+    p_synth.add_argument("--model", default=DEFAULT_PI_MODEL, help="Pi model identifier")
 
     args = parser.parse_args()
     if args.cmd in ("status", "poll", None):
@@ -166,6 +193,8 @@ def main():
         cmd_bind_github(args)
     elif args.cmd == "daemon":
         cmd_daemon(args)
+    elif args.cmd == "synthesize":
+        cmd_synthesize(args)
     elif args.cmd == "trigger":
         cmd_trigger(args)
     elif args.cmd == "run-plan":

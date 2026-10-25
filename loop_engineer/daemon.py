@@ -12,16 +12,18 @@ Architecture:
 
 import json
 import os
+import re
 import subprocess
 import time
 from typing import Dict, List, Optional
 
-from .collector import ConversationCollector
+from .collector import ConversationCollector, EngineeringSignal
 from .github_sync import GitHubSyncManager
 from .planner import CommitMilestone, PlannedProject, WeeklyPlanner
 
 PI_BIN = "/Users/huanghaodong/.npm-global/bin/pi"
 DEFAULT_PI_MODEL = "local-gateway/claude-opus-5-5-high"
+DEFAULT_DAILY_QUOTA = 3
 
 
 class LoopDaemon:
@@ -30,10 +32,12 @@ class LoopDaemon:
         root_dir: str = "/Users/huanghaodong/Desktop/project",
         state_dir: str = "/Users/huanghaodong/Desktop/project/.state",
         pi_model: str = DEFAULT_PI_MODEL,
+        daily_quota: int = DEFAULT_DAILY_QUOTA,
     ):
         self.root_dir = root_dir
         self.state_dir = state_dir
         self.pi_model = pi_model
+        self.daily_quota = max(1, int(daily_quota))
         self.pid_file = os.path.join(self.state_dir, "daemon.pid")
         self.runner_pid_file = os.path.join(self.state_dir, "runner.pid")
         self.log_file = os.path.join(self.state_dir, "daemon.log")
@@ -55,16 +59,92 @@ class LoopDaemon:
         if os.path.exists(self.dispatch_state_file):
             try:
                 with open(self.dispatch_state_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if "daily_dispatch_counts" not in data:
+                    data["daily_dispatch_counts"] = {}
+                return data
             except Exception:
                 pass
         return {
             "engine": "pi",
             "model": self.pi_model,
             "last_dispatch_date": "",
+            "daily_dispatch_counts": {},
             "active_milestone": None,
             "dispatched_milestones": {},
         }
+
+    def synthesize_milestones_via_pi(self, signals: List[EngineeringSignal]) -> List[str]:
+        """
+        When the backlog runs out of pending milestones, invoke Pi (`claude-opus-5-5-high`)
+        to synthesize 2 new projects/milestones directly from the user's latest conversations and diaries.
+        """
+        projects = self.planner.load_or_init_projects()
+        existing_repos = [
+            f"- {p.repo_name} ({p.mode}): {[m.milestone_id for m in p.milestones]}"
+            for p in projects
+        ]
+        recent_sigs = [
+            f"- [{s.date}] ({s.pillar} / {s.source_type}) {s.title}: {s.summary[:160]}"
+            for s in signals[:15]
+        ]
+        synth_prompt = (
+            "【Loop Engineer 动态需求合成器 · 只输出纯 JSON，不要调用任何写文件工具】\n"
+            "请分析以下最新的本地对话与思考日记信号，结合已有仓库列表，提炼生成 1~2 个高价值的新项目（`extrapolate_new`）或已有项目的新演进阶段（`self_optimize`），每个包含 2 个可由 pytest 验证的 Milestone。\n\n"
+            "已有仓库与 Milestone：\n" + "\n".join(existing_repos) + "\n\n"
+            "最新对话与日记信号：\n" + "\n".join(recent_sigs) + "\n\n"
+            "请严格只输出一个 ```json ... ``` 代码块，格式为数组：\n"
+            "```json\n"
+            "[\n"
+            "  {\n"
+            '    "repo_name": "kebab-case-slug",\n'
+            '    "pillar": "ai-infra-harness | workflow-mcp | quant-fintech-web3 | cognitive-systems",\n'
+            '    "mode": "extrapolate_new",\n'
+            '    "local_target_dir": "/Users/huanghaodong/Desktop/project/workspaces/kebab-case-slug",\n'
+            '    "tagline": "[New Extrapolated Project] Concise cold engineering description.",\n'
+            '    "origin_context": "Why this was synthesized from the recent conversation signals.",\n'
+            '    "tech_stack": ["Python", "PyTest"],\n'
+            '    "milestones": [\n'
+            "      {\n"
+            '        "milestone_id": "unique-id-m1",\n'
+            '        "commit_type": "feat",\n'
+            '        "scope": "core",\n'
+            '        "summary": "concise commit summary",\n'
+            '        "deliverables": ["pkg/module.py", "tests/test_module.py"]\n'
+            "      }\n"
+            "    ]\n"
+            "  }\n"
+            "]\n"
+            "```"
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:/Users/huanghaodong/.npm-global/bin:/opt/anaconda3/bin:{env.get('PATH', '')}"
+        cmd = [
+            PI_BIN,
+            "--print",
+            "--model",
+            self.pi_model,
+            "--thinking",
+            "low",
+            "--no-mcp",
+            "--no-tools",
+            "--",
+            synth_prompt,
+        ]
+        try:
+            self.log(f"Synthesizing new milestones from {len(signals)} conversation signals via Pi ({self.pi_model})...")
+            proc = subprocess.run(cmd, cwd=self.root_dir, env=env, capture_output=True, text=True, timeout=300)
+            out = proc.stdout or ""
+            match = re.search(r"```json\s*(\[.*?\])\s*```", out, re.DOTALL)
+            raw_json = match.group(1) if match else out.strip()
+            items = json.loads(raw_json)
+            if isinstance(items, list):
+                added = self.planner.merge_llm_synthesized_plan(items)
+                self.log(f"Synthesized {len(added)} new milestones via Pi: {added}")
+                return added
+        except Exception as exc:
+            self.log(f"Pi synthesis skipped/failed ({exc}); relying on deterministic synthesizer.")
+        return []
 
     def _save_dispatch_state(self, state: Dict) -> None:
         os.makedirs(self.state_dir, exist_ok=True)
@@ -123,10 +203,19 @@ class LoopDaemon:
         """Invoke Pi Agent (`pi --print --model local-gateway/claude-opus-5-5-high`) to execute the next milestone."""
         today = time.strftime("%Y-%m-%d")
         dstate = self._load_dispatch_state()
-        if not force and dstate.get("last_dispatch_date") == today:
-            return {"dispatched": False, "reason": f"Already dispatched today ({today}). Use --force to run now."}
+        daily_counts = dstate.get("daily_dispatch_counts") or {}
+        today_count = int(daily_counts.get(today, 0))
+        if not force and today_count >= self.daily_quota:
+            return {
+                "dispatched": False,
+                "reason": f"Daily quota reached ({today_count}/{self.daily_quota}) for {today}. Use --force to run now.",
+            }
 
         next_item = self.planner.next_actionable_milestone(repo_name=repo_name)
+        if not next_item:
+            signals = self.collector.collect_all()
+            self.synthesize_milestones_via_pi(signals)
+            next_item = self.planner.next_actionable_milestone(repo_name=repo_name)
         if not next_item:
             return {"dispatched": False, "reason": "All planned milestones completed."}
 
@@ -184,18 +273,33 @@ class LoopDaemon:
                 timeout=1200,
             )
 
+        # Check whether milestone was actually completed
+        after_next = self.planner.next_actionable_milestone(repo_name=proj.repo_name)
+        completed_ok = proc.returncode == 0 and (
+            not after_next or after_next["milestone"].milestone_id != ms.milestone_id
+        )
+
         dstate = self._load_dispatch_state()
-        dstate["last_dispatch_date"] = today
+        if "daily_dispatch_counts" not in dstate or not isinstance(dstate["daily_dispatch_counts"], dict):
+            dstate["daily_dispatch_counts"] = {}
+        if completed_ok:
+            dstate["last_dispatch_date"] = today
+            dstate["daily_dispatch_counts"][today] = int(dstate["daily_dispatch_counts"].get(today, 0)) + 1
         dstate["active_milestone"] = None
         dstate["dispatched_milestones"][ms.milestone_id] = {
             "repo_name": proj.repo_name,
             "model": self.pi_model,
             "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "exit_code": proc.returncode,
+            "completed": completed_ok,
             "log_file": run_log_path,
         }
         self._save_dispatch_state(dstate)
-        self.log(f"Finished Pi ({self.pi_model}) for {ms.milestone_id} (exit_code={proc.returncode})")
+        self.log(
+            f"Finished Pi ({self.pi_model}) for {ms.milestone_id} "
+            f"(exit_code={proc.returncode}, completed={completed_ok}, "
+            f"today_quota={dstate['daily_dispatch_counts'].get(today, 0)}/{self.daily_quota})"
+        )
         return {
             "dispatched": True,
             "engine": "pi",
@@ -203,6 +307,9 @@ class LoopDaemon:
             "repo_name": proj.repo_name,
             "milestone_id": ms.milestone_id,
             "exit_code": proc.returncode,
+            "completed": completed_ok,
+            "today_dispatched": dstate["daily_dispatch_counts"].get(today, 0),
+            "daily_quota": self.daily_quota,
             "log_file": run_log_path,
         }
 
@@ -275,11 +382,14 @@ class LoopDaemon:
         os._exit(0)
 
     def run_poll_and_sync_cycle(self, auto_dispatch: bool = False) -> Dict:
-        """Execute one silent collection + backlog enrichment pass (0 LLM tokens unless auto_dispatch triggers)."""
+        """Execute one silent collection + backlog enrichment pass (0 LLM tokens unless synthesis or auto_dispatch triggers)."""
         os.makedirs(self.state_dir, exist_ok=True)
         signals = self.collector.collect_all()
         ingested = self.planner.ingest_signals(signals)
         next_item = self.planner.next_actionable_milestone()
+        if not next_item and signals:
+            self.synthesize_milestones_via_pi(signals)
+            next_item = self.planner.next_actionable_milestone()
 
         next_summary = None
         if next_item:
@@ -295,18 +405,31 @@ class LoopDaemon:
 
         dispatch_res = None
         if auto_dispatch:
-            current_hour = int(time.strftime("%H"))
-            if current_hour >= 11:
-                try:
-                    dispatch_res = self.dispatch_next_milestone_to_model(force=False)
-                except Exception as exc:
-                    dispatch_res = {"dispatched": False, "error": str(exc)}
+            try:
+                dispatch_res = self.dispatch_next_milestone_to_model(force=False)
+                # Refresh next_item after dispatch so status_payload reflects post-dispatch queue
+                next_item = self.planner.next_actionable_milestone()
+                if next_item:
+                    proj = next_item["project"]
+                    ms = next_item["milestone"]
+                    next_summary = {
+                        "repo_name": proj.repo_name,
+                        "mode": proj.mode,
+                        "milestone_id": ms.milestone_id,
+                        "commit_header": f"{ms.commit_type}({ms.scope}): {ms.summary}",
+                        "deliverables": ms.deliverables,
+                    }
+                else:
+                    next_summary = None
+            except Exception as exc:
+                dispatch_res = {"dispatched": False, "error": str(exc)}
 
         status_payload = {
             "last_poll_ts": int(time.time()),
             "last_poll_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "engine": "pi",
             "pi_model": self.pi_model,
+            "daily_quota": self.daily_quota,
             "total_signals_collected": len(signals),
             "newly_ingested_by_repo": ingested,
             "next_actionable_milestone": next_summary,
@@ -317,7 +440,7 @@ class LoopDaemon:
             json.dump(status_payload, f, ensure_ascii=False, indent=2)
 
         self.log(
-            f"Polled {len(signals)} signals (0 tokens); ingested={sum(ingested.values())}; "
+            f"Polled {len(signals)} signals; ingested={sum(ingested.values())}; "
             f"next={next_summary['milestone_id'] if next_summary else 'NONE'}"
         )
         return status_payload
