@@ -406,7 +406,25 @@ class LoopDaemon:
         dispatch_res = None
         if auto_dispatch:
             try:
-                dispatch_res = self.dispatch_next_milestone_to_model(force=False)
+                # Execute all remaining milestones for today's quota consecutively
+                # so closing the Mac lid later won't interrupt today's 2nd and 3rd commits.
+                today = time.strftime("%Y-%m-%d")
+                while True:
+                    dstate = self._load_dispatch_state()
+                    today_done = int((dstate.get("daily_dispatch_counts") or {}).get(today, 0))
+                    if today_done >= self.daily_quota:
+                        break
+                    nxt = self.planner.next_actionable_milestone()
+                    if not nxt and signals:
+                        self.synthesize_milestones_via_pi(signals)
+                        nxt = self.planner.next_actionable_milestone()
+                    if not nxt:
+                        break
+                    res = self.dispatch_next_milestone_to_model(force=False)
+                    dispatch_res = res
+                    if not res.get("dispatched") or not res.get("completed"):
+                        break
+
                 # Refresh next_item after dispatch so status_payload reflects post-dispatch queue
                 next_item = self.planner.next_actionable_milestone()
                 if next_item:
